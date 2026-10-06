@@ -15,6 +15,8 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/configdiff"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/network"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/siderolink"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 )
@@ -81,4 +83,58 @@ func TestDiffString(t *testing.T) {
 			require.Equal(t, test.want, got)
 		})
 	}
+}
+
+func TestDiffConfigsIgnoresUnnamedDocumentOrder(t *testing.T) {
+	t.Parallel()
+
+	timeSync := network.NewTimeSyncConfigV1Alpha1()
+	timeSync.TimeNTP = &network.NTPConfig{Servers: []string{"time.cloudflare.com"}}
+
+	siderolinkConfig := siderolink.NewConfigV1Alpha1()
+	siderolinkConfig.APIUrlConfig = meta.URL{
+		URL: must.Value(url.Parse("https://example.com"))(t),
+	}
+
+	oldCfg := must.Value(container.New(timeSync, siderolinkConfig))(t)
+	newCfg := must.Value(container.New(siderolinkConfig, timeSync))(t)
+
+	diff, err := configdiff.DiffConfigs(oldCfg, newCfg)
+	require.NoError(t, err)
+	require.Empty(t, diff)
+
+	updatedTimeSync := timeSync.DeepCopy()
+	updatedTimeSync.TimeNTP.Servers = []string{"pool.ntp.org"}
+	updatedCfg := must.Value(container.New(siderolinkConfig, updatedTimeSync))(t)
+
+	diff, err = configdiff.DiffConfigs(oldCfg, updatedCfg)
+	require.NoError(t, err)
+	require.Contains(t, diff, "-        - time.cloudflare.com")
+	require.Contains(t, diff, "+        - pool.ntp.org")
+	require.NotContains(t, diff, "-kind:")
+	require.NotContains(t, diff, "+kind:")
+}
+
+func TestDiffConfigsMatchesNamedDocuments(t *testing.T) {
+	t.Parallel()
+
+	oldFoo := runtime.NewEtcFileConfigV1Alpha1("foo")
+	oldFoo.Contents = "foo contents\n"
+	oldBar := runtime.NewEtcFileConfigV1Alpha1("bar")
+	oldBar.Contents = "old bar contents\n"
+
+	newFoo := oldFoo.DeepCopy()
+	newBar := oldBar.DeepCopy()
+	newBar.Contents = "new bar contents\n"
+
+	oldCfg := must.Value(container.New(oldFoo, oldBar))(t)
+	newCfg := must.Value(container.New(newBar, newFoo))(t)
+
+	diff, err := configdiff.DiffConfigs(oldCfg, newCfg)
+	require.NoError(t, err)
+	require.Contains(t, diff, "-    old bar contents")
+	require.Contains(t, diff, "+    new bar contents")
+	require.NotContains(t, diff, "-name:")
+	require.NotContains(t, diff, "+name:")
+	require.NotContains(t, diff, "foo contents")
 }
